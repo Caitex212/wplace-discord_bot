@@ -41,7 +41,7 @@ def save_artworks():
 
 # --- Artwork class ---
 class Artwork:
-    def __init__(self, author_id, message_id, title, description, overlay_json, image_url, private, status="📜 Planned"):
+    def __init__(self, author_id, message_id, title, description, overlay_json, image_url, private, status="📜 Planned", followers=None):
         self.author_id = author_id
         self.message_id = message_id
         self.title = title
@@ -50,6 +50,7 @@ class Artwork:
         self.image_url = image_url
         self.private = private
         self.status = status
+        self.followers = followers or []
 
 # Load existing artworks
 artworks = {}
@@ -104,6 +105,8 @@ async def artwork_create(
         await msg.add_reaction("👍")
         artworks[str(msg.id)] = Artwork(ctx.author.id, str(msg.id), title, description, overlay_json, image.url, private)
         save_artworks()
+        # Create thread for comments
+        await msg.create_thread(name=f"Discussion - {title}")
         await ctx.respond("Your artwork has been posted!", ephemeral=True)
     except Exception as e:
         logging.error(f"Error in artwork_create: {e}")
@@ -157,6 +160,13 @@ async def artwork_set_status(ctx: discord.ApplicationContext, message_id: str, s
         await msg.edit(embed=embed)
         art.status = status
         save_artworks()
+        # Notify followers
+        for follower_id in art.followers:
+            user = await bot.fetch_user(follower_id)
+            try:
+                await user.send(f"Artwork '{art.title}' status updated to {status}.")
+            except:
+                pass
         await ctx.respond(f"Status updated to {status}", ephemeral=True)
     except Exception as e:
         logging.error(f"Error updating status for artwork {message_id}: {e}")
@@ -211,6 +221,56 @@ async def artwork_edit(ctx: discord.ApplicationContext, message_id: str, title: 
     except Exception as e:
         logging.error(f"Error editing artwork {message_id}: {e}")
         await ctx.respond("Failed to edit artwork.", ephemeral=True)
+
+
+@bot.slash_command(guild_ids=[GUILD_ID], description="List artworks with optional filters")
+@option("status", str, description="Filter by status", required=False, choices=["✅ Done", "🖌️ In progress", "📜 Planned"])
+@option("author", discord.Member, description="Filter by author", required=False)
+async def artwork_list(ctx: discord.ApplicationContext, status: str = None, author: discord.Member = None):
+    results = []
+    for art in artworks.values():
+        if status and art.status != status:
+            continue
+        if author and int(art.author_id) != author.id:
+            continue
+        results.append(art)
+
+    if not results:
+        await ctx.respond("No artworks found matching the criteria.", ephemeral=True)
+        return
+
+    embeds = []
+    for art in results:
+        embed = discord.Embed(title=art.title, description=art.description, color=discord.Color.blurple())
+        embed.add_field(name="Overlay JSON", value=f"```json\n{art.overlay_json}\n```", inline=False)
+        embed.add_field(name="Status", value=art.status, inline=True)
+        if not art.private:
+            user = await bot.fetch_user(art.author_id)
+            embed.set_footer(text=f"By {user.display_name}")
+        embed.set_image(url=art.image_url)
+        embeds.append(embed)
+
+    for embed in embeds:
+        await ctx.respond(embed=embed, ephemeral=True)
+
+
+@bot.slash_command(guild_ids=[GUILD_ID], description="Follow an artwork to get status updates")
+@option("message_id", str, description="Message ID of the artwork")
+async def artwork_follow(ctx: discord.ApplicationContext, message_id: str):
+    art = artworks.get(message_id)
+    if not art:
+        await ctx.respond("Artwork not found.", ephemeral=True)
+        return
+    if ctx.author.id == int(art.author_id):
+        await ctx.respond("You cannot follow your own artwork.", ephemeral=True)
+        return
+    if ctx.author.id in art.followers:
+        await ctx.respond("You are already following this artwork.", ephemeral=True)
+        return
+
+    art.followers.append(ctx.author.id)
+    save_artworks()
+    await ctx.respond(f"You are now following '{art.title}'. You will receive updates when the status changes.", ephemeral=True)
 
 
 bot.run(TOKEN)
