@@ -34,6 +34,7 @@ All commands are slash commands (`/`):
 
 ### `/artwork create`
 Create a new artwork post.
+- `title` – A short title for your artwork.
 - `description` – Short text describing your artwork.
 - `overlay_json` – JSON string for WPlace Overlay Pro.
 - `image` – Upload your artwork image.
@@ -47,6 +48,7 @@ Update the status of your artwork (only the author can do this).
 ### `/artwork edit`
 Edit the details of your artwork post.
 - `message_id` – The message ID of the artwork post.
+- `title` – *(optional)* Update title.
 - `description` – *(optional)* Update description.
 - `overlay_json` – *(optional)* Update overlay JSON.
 - `image` – *(optional)* Upload a new image.
