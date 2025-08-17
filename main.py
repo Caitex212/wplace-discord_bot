@@ -1,10 +1,11 @@
 import discord
 from discord.ext import commands
 from discord import option
-import json
+import sqlite3
 import os
 import logging
 from datetime import datetime
+import json
 
 # --- CONFIG ---
 from config import *
@@ -27,17 +28,24 @@ intents = discord.Intents.default()
 intents.message_content = False
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-# --- Persistence ---
-def load_artworks():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_artworks():
-    with open(DATA_FILE, "w") as f:
-        json.dump({k: v.__dict__ for k, v in artworks.items()}, f, indent=4)
+# --- Database Setup ---
+DB_FILE = "artworks.db"
+conn = sqlite3.connect(DB_FILE)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS artworks (
+    message_id TEXT PRIMARY KEY,
+    author_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    overlay_json TEXT,
+    image_url TEXT,
+    private INTEGER,
+    status TEXT,
+    followers TEXT
+)
+""")
+conn.commit()
 
 # --- Artwork class ---
 class Artwork:
@@ -52,11 +60,62 @@ class Artwork:
         self.status = status
         self.followers = followers or []
 
-# Load existing artworks
-artworks = {}
-raw_data = load_artworks()
-for k, v in raw_data.items():
-    artworks[k] = Artwork(**v)
+    def save(self):
+        cursor.execute("""
+            INSERT OR REPLACE INTO artworks (message_id, author_id, title, description, overlay_json, image_url, private, status, followers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            self.message_id,
+            self.author_id,
+            self.title,
+            self.description,
+            self.overlay_json,
+            self.image_url,
+            int(self.private),
+            self.status,
+            json.dumps(self.followers)
+        ))
+        conn.commit()
+
+    @staticmethod
+    def load(message_id):
+        cursor.execute("SELECT * FROM artworks WHERE message_id = ?", (message_id,))
+        row = cursor.fetchone()
+        if row:
+            return Artwork(
+                author_id=row[1],
+                message_id=row[0],
+                title=row[2],
+                description=row[3],
+                overlay_json=row[4],
+                image_url=row[5],
+                private=bool(row[6]),
+                status=row[7],
+                followers=json.loads(row[8] or "[]")
+            )
+        return None
+
+    @staticmethod
+    def all():
+        cursor.execute("SELECT * FROM artworks")
+        rows = cursor.fetchall()
+        return [Artwork(
+            author_id=row[1],
+            message_id=row[0],
+            title=row[2],
+            description=row[3],
+            overlay_json=row[4],
+            image_url=row[5],
+            private=bool(row[6]),
+            status=row[7],
+            followers=json.loads(row[8] or "[]")
+        ) for row in rows]
+
+    @staticmethod
+    def delete(message_id):
+        cursor.execute("DELETE FROM artworks WHERE message_id = ?", (message_id,))
+        conn.commit()
+
 
 # --- Events ---
 @bot.event
@@ -79,14 +138,7 @@ async def on_application_command(ctx):
 @option("overlay_json", str, description="Overlay Pro Import JSON string")
 @option("image", discord.Attachment, description="Upload your artwork image")
 @option("private", bool, description="Hide your name (private mode)?", required=False, default=False)
-async def artwork_create(
-    ctx: discord.ApplicationContext,
-    title: str,
-    description: str,
-    overlay_json: str,
-    image: discord.Attachment,
-    private: bool = False,
-):
+async def artwork_create(ctx, title, description, overlay_json, image, private: bool = False):
     logging.info(f"Executing artwork_create for user {ctx.author} with title '{title}'")
     channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     if not channel:
@@ -103,9 +155,8 @@ async def artwork_create(
     try:
         msg = await channel.send(embed=embed)
         await msg.add_reaction("👍")
-        artworks[str(msg.id)] = Artwork(ctx.author.id, str(msg.id), title, description, overlay_json, image.url, private)
-        save_artworks()
-        # Create thread for comments
+        art = Artwork(ctx.author.id, str(msg.id), title, description, overlay_json, image.url, private)
+        art.save()
         await msg.create_thread(name=f"Discussion - {title}")
         await ctx.respond("Your artwork has been posted!", ephemeral=True)
     except Exception as e:
@@ -115,23 +166,20 @@ async def artwork_create(
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="Delete one of your artworks")
 @option("message_id", str, description="Message ID of the artwork")
-async def artwork_delete(ctx: discord.ApplicationContext, message_id: str):
-    logging.info(f"Executing artwork_delete for user {ctx.author} on message {message_id}")
-    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
-    art = artworks.get(message_id)
-
+async def artwork_delete(ctx, message_id: str):
+    art = Artwork.load(message_id)
     if not art:
         await ctx.respond("Artwork not found.", ephemeral=True)
         return
-    if art.author_id != ctx.author.id:
+    if art.author_id != str(ctx.author.id):
         await ctx.respond("You can only delete your own artworks.", ephemeral=True)
         return
 
+    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     try:
         msg = await channel.fetch_message(int(message_id))
         await msg.delete()
-        del artworks[message_id]
-        save_artworks()
+        Artwork.delete(message_id)
         await ctx.respond("Your artwork has been deleted.", ephemeral=True)
     except Exception as e:
         logging.error(f"Error deleting artwork {message_id}: {e}")
@@ -141,26 +189,23 @@ async def artwork_delete(ctx: discord.ApplicationContext, message_id: str):
 @bot.slash_command(guild_ids=[GUILD_ID], description="Set the status of your artwork")
 @option("message_id", str, description="Message ID of the artwork")
 @option("status", str, description="New status", choices=["✅ Done", "🖌️ In progress", "📜 Planned"])
-async def artwork_set_status(ctx: discord.ApplicationContext, message_id: str, status: str):
-    logging.info(f"Executing artwork_set_status for user {ctx.author} on message {message_id} with status '{status}'")
-    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
-    art = artworks.get(message_id)
-
+async def artwork_set_status(ctx, message_id: str, status: str):
+    art = Artwork.load(message_id)
     if not art:
         await ctx.respond("Artwork not found.", ephemeral=True)
         return
-    if art.author_id != ctx.author.id:
+    if art.author_id != str(ctx.author.id):
         await ctx.respond("You can only update your own artworks.", ephemeral=True)
         return
 
+    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     try:
         msg = await channel.fetch_message(int(message_id))
         embed = msg.embeds[0]
         embed.set_field_at(1, name="Status", value=status, inline=True)
         await msg.edit(embed=embed)
         art.status = status
-        save_artworks()
-        # Notify followers
+        art.save()
         for follower_id in art.followers:
             user = await bot.fetch_user(follower_id)
             try:
@@ -180,22 +225,19 @@ async def artwork_set_status(ctx: discord.ApplicationContext, message_id: str, s
 @option("overlay_json", str, description="New overlay JSON", required=False)
 @option("image", discord.Attachment, description="New artwork image", required=False)
 @option("private", bool, description="Hide your name (private mode)?", required=False)
-async def artwork_edit(ctx: discord.ApplicationContext, message_id: str, title: str = None, description: str = None, overlay_json: str = None, image: discord.Attachment = None, private: bool = None):
-    logging.info(f"Executing artwork_edit for user {ctx.author} on message {message_id} with options: title={title}, description={description}, overlay_json={overlay_json}, image={image}, private={private}")
-    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
-    art = artworks.get(message_id)
-
+async def artwork_edit(ctx, message_id: str, title=None, description=None, overlay_json=None, image=None, private=None):
+    art = Artwork.load(message_id)
     if not art:
         await ctx.respond("Artwork not found.", ephemeral=True)
         return
-    if art.author_id != ctx.author.id:
+    if art.author_id != str(ctx.author.id):
         await ctx.respond("You can only edit your own artworks.", ephemeral=True)
         return
 
+    channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     try:
         msg = await channel.fetch_message(int(message_id))
         embed = msg.embeds[0]
-
         if title:
             embed.title = title
             art.title = title
@@ -216,7 +258,7 @@ async def artwork_edit(ctx: discord.ApplicationContext, message_id: str, title: 
                 embed.set_footer(text=f"By {ctx.author.display_name}")
 
         await msg.edit(embed=embed)
-        save_artworks()
+        art.save()
         await ctx.respond("Artwork updated!", ephemeral=True)
     except Exception as e:
         logging.error(f"Error editing artwork {message_id}: {e}")
@@ -226,9 +268,9 @@ async def artwork_edit(ctx: discord.ApplicationContext, message_id: str, title: 
 @bot.slash_command(guild_ids=[GUILD_ID], description="List artworks with optional filters")
 @option("status", str, description="Filter by status", required=False, choices=["✅ Done", "🖌️ In progress", "📜 Planned"])
 @option("author", discord.Member, description="Filter by author", required=False)
-async def artwork_list(ctx: discord.ApplicationContext, status: str = None, author: discord.Member = None):
+async def artwork_list(ctx, status=None, author=None):
     results = []
-    for art in artworks.values():
+    for art in Artwork.all():
         if status and art.status != status:
             continue
         if author and int(art.author_id) != author.id:
@@ -239,7 +281,6 @@ async def artwork_list(ctx: discord.ApplicationContext, status: str = None, auth
         await ctx.respond("No artworks found matching the criteria.", ephemeral=True)
         return
 
-    embeds = []
     for art in results:
         embed = discord.Embed(title=art.title, description=art.description, color=discord.Color.blurple())
         embed.add_field(name="Overlay JSON", value=f"```json\n{art.overlay_json}\n```", inline=False)
@@ -248,16 +289,13 @@ async def artwork_list(ctx: discord.ApplicationContext, status: str = None, auth
             user = await bot.fetch_user(art.author_id)
             embed.set_footer(text=f"By {user.display_name}")
         embed.set_image(url=art.image_url)
-        embeds.append(embed)
-
-    for embed in embeds:
         await ctx.respond(embed=embed, ephemeral=True)
 
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="Follow an artwork to get status updates")
 @option("message_id", str, description="Message ID of the artwork")
-async def artwork_follow(ctx: discord.ApplicationContext, message_id: str):
-    art = artworks.get(message_id)
+async def artwork_follow(ctx, message_id: str):
+    art = Artwork.load(message_id)
     if not art:
         await ctx.respond("Artwork not found.", ephemeral=True)
         return
@@ -269,8 +307,24 @@ async def artwork_follow(ctx: discord.ApplicationContext, message_id: str):
         return
 
     art.followers.append(ctx.author.id)
-    save_artworks()
+    art.save()
     await ctx.respond(f"You are now following '{art.title}'. You will receive updates when the status changes.", ephemeral=True)
+
+
+@bot.slash_command(guild_ids=[GUILD_ID], description="Unfollow an artwork")
+@option("message_id", str, description="Message ID of the artwork")
+async def artwork_unfollow(ctx, message_id: str):
+    art = Artwork.load(message_id)
+    if not art:
+        await ctx.respond("Artwork not found.", ephemeral=True)
+        return
+    if ctx.author.id not in art.followers:
+        await ctx.respond("You are not following this artwork.", ephemeral=True)
+        return
+
+    art.followers.remove(ctx.author.id)
+    art.save()
+    await ctx.respond(f"You have unfollowed '{art.title}'.", ephemeral=True)
 
 
 bot.run(TOKEN)
