@@ -3,9 +3,25 @@ from discord.ext import commands
 from discord import option
 import json
 import os
+import logging
+from datetime import datetime
 
 # --- CONFIG ---
 from config import *
+
+# --- Logging setup ---
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+log_filename = os.path.join(LOG_DIR, f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
 
 intents = discord.Intents.default()
 intents.message_content = False
@@ -39,6 +55,20 @@ raw_data = load_artworks()
 for k, v in raw_data.items():
     artworks[k] = Artwork(**v)
 
+# --- Events ---
+@bot.event
+async def on_ready():
+    logging.info(f"Bot is online as {bot.user} (ID: {bot.user.id})")
+
+@bot.event
+async def on_application_command(ctx):
+    selected_options = {opt['name']: opt['value'] for opt in ctx.selected_options}
+    logging.info(
+        f"User {ctx.author} (ID: {ctx.author.id}) executed command '{ctx.command.qualified_name}' "
+        f"with options: {selected_options} "
+        f"in guild {ctx.guild} (ID: {ctx.guild_id})"
+    )
+
 # --- Slash Commands ---
 @bot.slash_command(guild_ids=[GUILD_ID], description="Create a new artwork post")
 @option("description", str, description="Description of your artwork")
@@ -52,6 +82,7 @@ async def artwork_create(
     image: discord.Attachment,
     private: bool = False,
 ):
+    logging.info(f"Executing artwork_create for user {ctx.author} with description '{description}'")
     channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     if not channel:
         await ctx.respond("Artworks channel not found.", ephemeral=True)
@@ -64,17 +95,20 @@ async def artwork_create(
         embed.set_footer(text=f"By {ctx.author.display_name}")
     embed.set_image(url=image.url)
 
-    msg = await channel.send(embed=embed)
-    await msg.add_reaction("👍")
-
-    artworks[str(msg.id)] = Artwork(ctx.author.id, str(msg.id), description, overlay_json, image.url, private)
-    save_artworks()
-
-    await ctx.respond("Your artwork has been posted!", ephemeral=True)
+    try:
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction("👍")
+        artworks[str(msg.id)] = Artwork(ctx.author.id, str(msg.id), description, overlay_json, image.url, private)
+        save_artworks()
+        await ctx.respond("Your artwork has been posted!", ephemeral=True)
+    except Exception as e:
+        logging.error(f"Error in artwork_create: {e}")
+        await ctx.respond("Failed to post artwork.", ephemeral=True)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="Delete one of your artworks")
 @option("message_id", str, description="Message ID of the artwork")
 async def artwork_delete(ctx: discord.ApplicationContext, message_id: str):
+    logging.info(f"Executing artwork_delete for user {ctx.author} on message {message_id}")
     channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     art = artworks.get(message_id)
 
@@ -91,13 +125,15 @@ async def artwork_delete(ctx: discord.ApplicationContext, message_id: str):
         del artworks[message_id]
         save_artworks()
         await ctx.respond("Your artwork has been deleted.", ephemeral=True)
-    except:
+    except Exception as e:
+        logging.error(f"Error deleting artwork {message_id}: {e}")
         await ctx.respond("Failed to delete artwork.", ephemeral=True)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="Set the status of your artwork")
 @option("message_id", str, description="Message ID of the artwork")
 @option("status", str, description="New status", choices=["✅ Done", "🖌️ In progress", "📜 Planned"])
 async def artwork_set_status(ctx: discord.ApplicationContext, message_id: str, status: str):
+    logging.info(f"Executing artwork_set_status for user {ctx.author} on message {message_id} with status '{status}'")
     channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     art = artworks.get(message_id)
 
@@ -116,7 +152,8 @@ async def artwork_set_status(ctx: discord.ApplicationContext, message_id: str, s
         art.status = status
         save_artworks()
         await ctx.respond(f"Status updated to {status}", ephemeral=True)
-    except:
+    except Exception as e:
+        logging.error(f"Error updating status for artwork {message_id}: {e}")
         await ctx.respond("Failed to update status.", ephemeral=True)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="Edit your artwork")
@@ -133,6 +170,8 @@ async def artwork_edit(
     image: discord.Attachment = None,
     private: bool = None
 ):
+    logging.info(f"Executing artwork_edit for user {ctx.author} on message {message_id} "
+                 f"with options: description={description}, overlay_json={overlay_json}, image={image}, private={private}")
     channel = bot.get_channel(ARTWORKS_CHANNEL_ID)
     art = artworks.get(message_id)
 
@@ -166,7 +205,8 @@ async def artwork_edit(
         await msg.edit(embed=embed)
         save_artworks()
         await ctx.respond("Artwork updated!", ephemeral=True)
-    except:
+    except Exception as e:
+        logging.error(f"Error editing artwork {message_id}: {e}")
         await ctx.respond("Failed to edit artwork.", ephemeral=True)
 
 bot.run(TOKEN)
