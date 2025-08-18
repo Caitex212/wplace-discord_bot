@@ -23,6 +23,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+logging.getLogger('discord').setLevel(logging.ERROR)
 
 intents = discord.Intents.default()
 intents.message_content = False
